@@ -1,6 +1,6 @@
 import binascii
-import time
 import datetime
+import time
 import pathlib
 import os
 import sys
@@ -18,10 +18,16 @@ def checksum_block(file, size=4096):
 	while data := file.read(size): crc = binascii.crc32(data, crc)
 	return format(crc, "08X")
 
+def fileinfo(path):
+	with open(path, "rb", 0) as f:
+		size = os.path.getsize(path)
+		checksum = checksum_block(f)
+		return (path, size, checksum)	
+
 class DirTree:
 	def __init__(self, root):
 		self.root = pathlib.Path(root).resolve()
-		self._errorlog = sys.stderr
+		self.restartpath = None
 
 	def walk(self, restart=None):
 		self._skipped = 0
@@ -30,22 +36,21 @@ class DirTree:
 		self._processed_bytes = 0
 		self._tree = os.walk(self.root)
 		if restart:
-			restart = (self.root / restart).resolve(True)
-			self._restartfile = restart
+			skip = True
+			self.restartpath = (self.root / restart).resolve(True)
 			for path,dirs,files in self._tree:
 				path = pathlib.Path(path)
-				if path == self._restartfile: restart = None
+				if path == self.restartpath: skip = False
 				for file in files:
 					fullpath = (path / file).resolve()
-					if fullpath == self._restartfile: restart = None
-					if restart: self._skipped += 1
+					if fullpath == self.restartpath: skip = False
+					if skip: self._skipped += 1
 					else:
 						try:
 							yield self._procfile(fullpath)
 						except Exception as exc:
-							print(f"Error processing file {exc.args[0]}: {exc.__cause__}", file=self._errorlog)
 							continue
-				if not restart: break
+				if not skip: break
 		for path,dirs,files in self._tree:
 			path = pathlib.Path(path)
 			for file in files:
@@ -53,48 +58,57 @@ class DirTree:
 				try:
 					yield self._procfile(fullpath)
 				except Exception as exc:
-					print(f"Error processing file {exc.args[0]}: {exc.__cause__}", file=self._errorlog)
-					continue
+					continue				
 
-	def run(self, out, restart=None, errorlog=sys.stderr):
-		self._errorlog = errorlog
-		print(f"ROOT: {self.root}", file=out)
-		t1 = time.perf_counter()
-		for entry in self.walk(restart):
-			print("{},{},{}".format(*entry), file=out)
-		t2 = time.perf_counter()
-		total_time = t2 - t1
-		speed = self._processed_bytes / total_time
-		print(f"Skipped files: {self._skipped}\nProcessed files: {self._processed}\nErrors: {self._erroneous}\nElapsed time: {datetime.timedelta(seconds=total_time)}\nBytes processed: {self._processed_bytes}B\nSpeed: {bytesize(speed)}/s")
-		
+	@property
+	def skipped(self):
+		return self._skipped
+
+	@property
+	def processed(self):
+		return self._processed
+
+	@property
+	def erroneous(self):
+		return self._erroneous
+
+	@property
+	def processed_bytes(self):
+		return self._processed_bytes
+
 	def _procfile(self, path):
 		try:
-			f = open(path, "rb", 0)
-			size = os.path.getsize(path)
-			checksum = checksum_block(f)
+			info = fileinfo(path)
+			path, size = info[:2]
 		except Exception as exc:
 			self._erroneous += 1 
-			raise RuntimeError(path) from exc	
+			print(f"Error processing file {path}: {exc}", file=sys.stderr)
+			raise
 		else:
-			f.close()			
 			self._processed += 1
 			self._processed_bytes += size
-			return (path, size, checksum)
+			return info
 
 if __name__ == "__main__":
 	import argparse
 	parser = argparse.ArgumentParser()
-	parser.add_argument("root", type=str, help="target directory")
-	parser.add_argument("-o", "--output", type=str, help="output file")
-	parser.add_argument("-e", "--error", type=str, help="error log file")
+	parser.add_argument("directory", type=str, help="target directory")
+	parser.add_argument("-o", "--output", type=str, help="save output to file")
+	parser.add_argument("-f", "--flush", type=int, default=2048, help="autosave file every n MB")
 	parser.add_argument("-r", "--resume", type=str, help="resume traversing the tree from this file or directory")
 	args = parser.parse_args()
-	root = args.root
+	root = args.directory
 	if args.output: output = open(args.output, "w", encoding="UTF-8")
-	else: output = sys.stdout
-	if args.error: error = open(args.error, "w", encoding="UTF-8")
-	else: error = sys.stderr
 	tree = DirTree(root)
-	tree.run(output, args.resume, error)
-	if args.error: error.close()
-	if args.output: output.close()	
+	print(f"ROOT: {tree.root}", file=output)
+	last_flush = 0
+	t_0 = time.perf_counter()
+	for entry in tree.walk(args.resume):
+		print("{},{},{}".format(*entry), file=output)
+		if tree.processed_bytes - last_flush >= args.flush * 2**20:
+			output.flush()
+			last_flush = tree.processed_bytes
+	total_time = time.perf_counter() - t_0
+	speed = tree.processed_bytes / total_time
+	print(f"Skipped files: {tree.skipped}\nProcessed files: {tree.processed}\nErrors: {tree.erroneous}\nElapsed time: {datetime.timedelta(seconds=total_time)}\nBytes processed: {tree.processed_bytes}B\nSpeed: {bytesize(speed)}/s")
+	if args.output: output.close()
