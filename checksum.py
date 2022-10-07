@@ -1,15 +1,15 @@
 import binascii
 import datetime
-import time
-import pathlib
 import os
+import pathlib
 import sys
+import time
 
 
 class bytesize(int):
 	PREFIXES = ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi", "Yi")
 	def __str__(self):
-		i = min(len(self.__class__.PREFIXES) - 1, (self.bit_length() - 1) // 10)
+		i = min(len(self.__class__.PREFIXES) - 1, (max(1, self.bit_length()) - 1) // 10)
 		p = self.__class__.PREFIXES[i]
 		return f"{self / 1024**i:.1f}{p}B"
 
@@ -99,12 +99,13 @@ if __name__ == "__main__":
 	args = parser.parse_args()
 	root = args.directory
 	if args.output: output = open(args.output, "w", encoding="UTF-8")
+	else: output = sys.stdout
 	tree = DirTree(root)
 	print(f"ROOT: {tree.root}", file=output)
 	last_flush = 0
 	t_0 = time.perf_counter()
-	for entry in tree.walk(args.resume):
-		print("{},{},{}".format(*entry), file=output)
+	for path, size, checksum in tree.walk(args.resume):
+		print("{},{},{}".format(path.relative_to(tree.root), size, checksum), file=output)
 		if tree.processed_bytes - last_flush >= args.flush * 2**20:
 			output.flush()
 			last_flush = tree.processed_bytes
